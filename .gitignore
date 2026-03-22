@@ -1,0 +1,19 @@
+# Ignore dataset
+ai-service/data/
+
+# Ignore virtual environment
+.venv/
+
+# Ignore cache
+__pycache__/
+*.pyc
+
+# Ignore temporary images
+*.png
+
+# Ignore large model files (optional)
+*.keras
+*.h5
+
+# OS files
+.DS_Store
