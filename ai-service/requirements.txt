@@ -4,6 +4,9 @@ numpy
 Pillow
 streamlit
 opencv-python
+torch
+torchvision
 
-run -   cd "D:\Final Project\When-will-banana-die\ai-service\training"
-        >> streamlit run app.py
+# run:
+#   cd "D:\Final Project\When-will-banana-die\ai-service\training"
+#   streamlit run app.py

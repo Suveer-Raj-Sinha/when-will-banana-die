@@ -3,9 +3,9 @@ import os
 from predict import analyze_image
 from gradcam import generate_gradcam
 
-st.set_page_config(page_title="When Will Banana Die?", layout="centered")
+st.set_page_config(page_title="Food Freshness Analyzer", layout="centered")
 
-st.title("When Will fruit Die?")
+st.title("Food Freshness Analyzer")
 st.write("Upload an image of a fruit or vegetable to analyze its freshness.")
 
 uploaded = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
@@ -15,7 +15,7 @@ if uploaded:
     with open(temp_path, "wb") as f:
         f.write(uploaded.read())
 
-    st.image(temp_path, caption="Uploaded Image", use_column_width=True)
+    st.image(temp_path, caption="Uploaded Image", use_container_width=True)
 
     with st.spinner("Analyzing..."):
         result = analyze_image(temp_path)
@@ -34,7 +34,7 @@ if uploaded:
         st.metric("Confidence", f'{result["confidence_percent"]}%')
 
     with col2:
-        st.metric("Freshness Score", result["freshness_score"])
+        st.metric("Freshness Score", f'{result["freshness_score"]} / 100')
         st.metric("Days Left", result["days_to_spoil"])
 
     st.info(result["advice"])
@@ -44,4 +44,4 @@ if uploaded:
 
     if os.path.exists(gradcam_path):
         st.subheader("Model Attention (Grad-CAM)")
-        st.image(gradcam_path, caption="Grad-CAM Output", use_column_width=True)
+        st.image(gradcam_path, caption="Grad-CAM Output", use_container_width=True)

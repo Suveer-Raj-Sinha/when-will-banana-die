@@ -1,0 +1,16 @@
+# ML
+tensorflow
+numpy
+Pillow
+opencv-python
+scikit-learn
+matplotlib
+
+# API
+fastapi
+uvicorn[standard]
+python-multipart
+aiofiles
+
+# UI
+streamlit

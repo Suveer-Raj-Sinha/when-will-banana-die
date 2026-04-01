@@ -1,0 +1,24 @@
+                   precision    recall  f1-score   support
+
+      freshapples       0.98      1.00      0.99       485
+      freshbanana       1.00      1.00      1.00       481
+ freshbittergroud       0.99      1.00      0.99        69
+    freshcapsicum       1.00      1.00      1.00       200
+    freshcucumber       0.96      0.91      0.93       101
+        freshokra       0.91      0.96      0.94       132
+     freshoranges       0.97      1.00      0.98       267
+      freshpotato       0.94      0.87      0.90        92
+      freshtomato       0.98      0.99      0.98       371
+     rottenapples       1.00      0.99      0.99       663
+     rottenbanana       0.99      1.00      1.00       562
+rottenbittergroud       1.00      0.98      0.99        61
+   rottencapsicum       1.00      1.00      1.00       179
+   rottencucumber       0.81      0.90      0.85        78
+       rottenokra       0.94      0.78      0.85        80
+    rottenoranges       1.00      0.97      0.98       327
+     rottenpotato       0.92      0.96      0.94       164
+     rottentomato       0.99      0.98      0.99       411
+
+         accuracy                           0.98      4723
+        macro avg       0.97      0.96      0.96      4723
+     weighted avg       0.98      0.98      0.98      4723
