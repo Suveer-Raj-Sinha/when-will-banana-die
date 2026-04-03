@@ -4,17 +4,21 @@ main.py  —  Food Freshness REST API
 Run from the project root:
     uvicorn ai-service.api.main:app --reload --port 8000
 
-Swagger UI (auto-generated docs):
+Swagger UI:
     http://localhost:8000/docs
 
 Endpoints:
-    POST   /predict           – single image analysis
-    POST   /predict/batch     – up to 10 images at once
-    GET    /history           – paginated scan history
-    GET    /history/{id}      – single scan
-    DELETE /history/{id}      – delete a scan
-    GET    /stats             – summary stats for dashboard
-    GET    /health            – health check
+    POST   /predict               – single image analysis
+    POST   /predict/batch         – up to 10 images at once
+    GET    /history               – paginated scan history
+    GET    /history/{id}          – single scan
+    DELETE /history/{id}          – delete a scan
+    GET    /stats                 – summary stats
+    GET    /recipes               – recipes for all foods
+    GET    /recipes/{food}        – recipes for a specific food
+    GET    /recipes/expiring      – recipes for items expiring soon
+    GET    /storage-tips/{food}   – detailed storage tips for a food
+    GET    /health                – health check
 """
 
 import os
@@ -32,14 +36,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# ── make training/ importable ───────────────────────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.dirname(__file__))   # ai-service/
+# ── path setup ───────────────────────────────────────────────────────────────
+BASE_DIR     = os.path.dirname(os.path.dirname(__file__))
 TRAINING_DIR = os.path.join(BASE_DIR, "training")
 sys.path.insert(0, TRAINING_DIR)
 
-from predict import analyze_image  # noqa: E402  (import after path setup)
+from predict import analyze_image
+from recipes import get_storage_tips, get_recipes, get_recipes_for_expiring, RECIPES
 
-# ── directories ─────────────────────────────────────────────────────────────
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 DB_PATH    = os.path.join(BASE_DIR, "scans.db")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -48,7 +52,7 @@ ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 # ─────────────────────────────────────────────
-# DATABASE HELPERS
+# DATABASE
 # ─────────────────────────────────────────────
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -63,6 +67,7 @@ def init_db():
             id                 TEXT PRIMARY KEY,
             created_at         TEXT NOT NULL,
             food               TEXT,
+            food_key           TEXT,
             status             TEXT,
             predicted_class    TEXT,
             confidence_percent REAL,
@@ -82,13 +87,14 @@ def save_scan(scan_id: str, image_path: str, result: dict, created_at: str):
     conn = get_db()
     conn.execute("""
         INSERT INTO scans
-            (id, created_at, food, status, predicted_class,
+            (id, created_at, food, food_key, status, predicted_class,
              confidence_percent, freshness_score, days_to_spoil,
              advice, note, image_path)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         scan_id, created_at,
         result.get("food"),
+        result.get("food_key"),
         result.get("status"),
         result.get("predicted_class"),
         result.get("confidence_percent"),
@@ -107,7 +113,7 @@ def row_to_dict(row) -> dict:
 
 
 # ─────────────────────────────────────────────
-# LIFESPAN — warm up model on startup
+# LIFESPAN
 # ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -121,7 +127,7 @@ async def lifespan(app: FastAPI):
         os.remove(warmup_path)
         print("[Model] Ready.")
     except Exception as e:
-        print(f"[Model] Warmup skipped ({e}) — will load on first request.")
+        print(f"[Model] Warmup skipped ({e})")
     yield
     print("[API] Shutdown.")
 
@@ -131,29 +137,24 @@ async def lifespan(app: FastAPI):
 # ─────────────────────────────────────────────
 app = FastAPI(
     title="Food Freshness API",
-    description=(
-        "ML-powered food freshness analysis system for reducing household food waste. "
-        "Upload fruit/vegetable images to get freshness status, estimated shelf life, "
-        "and storage advice."
-    ),
+    description="ML-powered food freshness analysis system for reducing household food waste.",
     version="2.0.0",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],       # lock this down in production
-    allow_credentials=True,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Serve uploaded images as static files (useful for frontend)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 # ─────────────────────────────────────────────
-# PYDANTIC MODELS
+# RESPONSE MODELS
 # ─────────────────────────────────────────────
 class ScanResult(BaseModel):
     scan_id:             str
@@ -165,6 +166,7 @@ class ScanResult(BaseModel):
     freshness_score:     int
     days_to_spoil:       int
     advice:              str
+    storage_tips:        dict
     note:                Optional[str]
 
 
@@ -190,7 +192,6 @@ def validate_image(file: UploadFile):
 
 
 async def save_upload(file: UploadFile) -> tuple[str, str]:
-    """Save upload to disk. Returns (scan_id, filepath)."""
     scan_id  = str(uuid.uuid4())
     ext      = os.path.splitext(file.filename or "image.jpg")[1].lower() or ".jpg"
     filepath = os.path.join(UPLOAD_DIR, f"{scan_id}{ext}")
@@ -200,26 +201,19 @@ async def save_upload(file: UploadFile) -> tuple[str, str]:
 
 
 # ─────────────────────────────────────────────
-# ROUTES
+# ROUTES — SYSTEM
 # ─────────────────────────────────────────────
-
 @app.get("/health", tags=["System"])
 def health():
-    """Quick health check — call this to confirm the API is running."""
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
-# ── Single predict ──────────────────────────
+# ─────────────────────────────────────────────
+# ROUTES — PREDICTION
+# ─────────────────────────────────────────────
 @app.post("/predict", response_model=ScanResult, tags=["Prediction"])
 async def predict(file: UploadFile = File(...)):
-    """
-    Analyse a single fruit or vegetable image.
-
-    - **file**: JPG / PNG image of the item
-
-    Returns freshness status, confidence score, estimated days left,
-    and storage advice. Every result is saved to history automatically.
-    """
+    """Analyse a single fruit or vegetable image."""
     validate_image(file)
     scan_id, filepath = await save_upload(file)
 
@@ -242,17 +236,14 @@ async def predict(file: UploadFile = File(...)):
         freshness_score=result["freshness_score"],
         days_to_spoil=result["days_to_spoil"],
         advice=result["advice"],
+        storage_tips=result["storage_tips"],
         note=result["note"],
     )
 
 
-# ── Batch predict ───────────────────────────
 @app.post("/predict/batch", tags=["Prediction"])
 async def predict_batch(files: list[UploadFile] = File(...)):
-    """
-    Analyse up to 10 images in a single request.
-    Results are returned in the same order as the uploaded files.
-    """
+    """Analyse up to 10 images in a single request."""
     if len(files) > 10:
         raise HTTPException(status_code=400, detail="Max 10 images per batch.")
 
@@ -264,35 +255,24 @@ async def predict_batch(files: list[UploadFile] = File(...)):
             result     = analyze_image(filepath)
             created_at = datetime.utcnow().isoformat()
             save_scan(scan_id, filepath, result, created_at)
-            results.append({
-                "scan_id":    scan_id,
-                "created_at": created_at,
-                "filename":   file.filename,
-                "error":      None,
-                **result,
-            })
+            results.append({"scan_id": scan_id, "created_at": created_at,
+                            "filename": file.filename, "error": None, **result})
         except Exception as e:
-            results.append({
-                "scan_id":  scan_id,
-                "filename": file.filename,
-                "error":    str(e),
-            })
+            results.append({"scan_id": scan_id, "filename": file.filename, "error": str(e)})
 
     return {"count": len(results), "results": results}
 
 
-# ── History ─────────────────────────────────
+# ─────────────────────────────────────────────
+# ROUTES — HISTORY
+# ─────────────────────────────────────────────
 @app.get("/history", tags=["History"])
 def get_history(
-    limit:  int           = Query(50,  ge=1, le=200),
-    offset: int           = Query(0,   ge=0),
-    food:   Optional[str] = Query(None, description="Filter by food name, e.g. banana"),
-    status: Optional[str] = Query(None, description="Filter by status: Fresh or Rotten"),
+    limit:  int           = Query(50, ge=1, le=200),
+    offset: int           = Query(0,  ge=0),
+    food:   Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
 ):
-    """
-    Returns paginated scan history, newest first.
-    Use `?food=banana` or `?status=Rotten` to filter.
-    """
     conn   = get_db()
     query  = "SELECT * FROM scans WHERE 1=1"
     params: list = []
@@ -305,7 +285,7 @@ def get_history(
         params.append(status)
 
     total = conn.execute(
-        f"SELECT COUNT(*) FROM scans WHERE 1=1"
+        "SELECT COUNT(*) FROM scans WHERE 1=1"
         + (" AND LOWER(food) = LOWER(?)" if food else "")
         + (" AND LOWER(status) = LOWER(?)" if status else ""),
         [p for p in [food, status] if p]
@@ -313,21 +293,15 @@ def get_history(
 
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params += [limit, offset]
-
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
-    return {
-        "total":  total,
-        "limit":  limit,
-        "offset": offset,
-        "scans":  [row_to_dict(r) for r in rows],
-    }
+    return {"total": total, "limit": limit, "offset": offset,
+            "scans": [row_to_dict(r) for r in rows]}
 
 
 @app.get("/history/{scan_id}", tags=["History"])
 def get_scan(scan_id: str):
-    """Fetch a single past scan by its ID."""
     conn = get_db()
     row  = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
     conn.close()
@@ -338,49 +312,37 @@ def get_scan(scan_id: str):
 
 @app.delete("/history/{scan_id}", tags=["History"])
 def delete_scan(scan_id: str):
-    """Delete a scan record and its uploaded image file."""
     conn = get_db()
     row  = conn.execute("SELECT image_path FROM scans WHERE id = ?", (scan_id,)).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail=f"Scan '{scan_id}' not found.")
-
     image_path = row["image_path"]
     if image_path and os.path.exists(image_path):
         os.remove(image_path)
-
     conn.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
     conn.commit()
     conn.close()
     return {"deleted": scan_id}
 
 
-# ── Stats ───────────────────────────────────
+# ─────────────────────────────────────────────
+# ROUTES — STATS
+# ─────────────────────────────────────────────
 @app.get("/stats", response_model=StatsResponse, tags=["Analytics"])
 def get_stats():
-    """
-    Aggregated statistics across all scans.
-    Feed this into your React analytics dashboard.
-    """
-    conn = get_db()
-
+    conn         = get_db()
     total        = conn.execute("SELECT COUNT(*) FROM scans").fetchone()[0]
     fresh_count  = conn.execute("SELECT COUNT(*) FROM scans WHERE status='Fresh'").fetchone()[0]
     rotten_count = conn.execute("SELECT COUNT(*) FROM scans WHERE status='Rotten'").fetchone()[0]
-
     top_food_row = conn.execute("""
-        SELECT food, COUNT(*) AS cnt
-        FROM scans
-        GROUP BY food
-        ORDER BY cnt DESC
-        LIMIT 1
+        SELECT food, COUNT(*) AS cnt FROM scans
+        GROUP BY food ORDER BY cnt DESC LIMIT 1
     """).fetchone()
-
     avg_row = conn.execute("""
         SELECT AVG(freshness_score), AVG(days_to_spoil)
         FROM scans WHERE status = 'Fresh'
     """).fetchone()
-
     conn.close()
 
     return StatsResponse(
@@ -391,3 +353,66 @@ def get_stats():
         avg_freshness = round(avg_row[0] or 0.0, 1),
         avg_days_left = round(avg_row[1] or 0.0, 1),
     )
+
+
+# ─────────────────────────────────────────────
+# ROUTES — RECIPES
+# ─────────────────────────────────────────────
+@app.get("/recipes", tags=["Recipes"])
+def all_recipes():
+    """Returns the full recipe database for all supported foods."""
+    return {"foods": list(RECIPES.keys()), "recipes": RECIPES}
+
+
+@app.get("/recipes/expiring", tags=["Recipes"])
+def recipes_for_expiring():
+    """
+    Checks your scan history for fresh items expiring within 3 days
+    and returns recipe suggestions sorted by urgency (fewest days first).
+    """
+    conn  = get_db()
+    rows  = conn.execute(
+        "SELECT * FROM scans WHERE status='Fresh' AND days_to_spoil <= 3 "
+        "ORDER BY days_to_spoil ASC LIMIT 20"
+    ).fetchall()
+    conn.close()
+
+    scans       = [row_to_dict(r) for r in rows]
+    suggestions = get_recipes_for_expiring(scans)
+
+    return {
+        "expiring_count": len(suggestions),
+        "suggestions":    suggestions,
+    }
+
+
+@app.get("/recipes/{food}", tags=["Recipes"])
+def recipes_for_food(food: str):
+    """
+    Returns recipes for a specific food.
+    Example: /recipes/banana  /recipes/tomato
+    """
+    food_key = food.lower()
+    result   = get_recipes([food_key])
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No recipes found for '{food}'. "
+                   f"Supported: {', '.join(RECIPES.keys())}"
+        )
+    return {"food": food_key, "recipes": result[food_key]}
+
+
+# ─────────────────────────────────────────────
+# ROUTES — STORAGE TIPS
+# ─────────────────────────────────────────────
+@app.get("/storage-tips/{food}", tags=["Storage Tips"])
+def storage_tips(food: str):
+    """
+    Returns detailed storage tips for a specific food.
+    Example: /storage-tips/banana  /storage-tips/potato
+    """
+    tips = get_storage_tips(food.lower())
+    if not tips:
+        raise HTTPException(status_code=404, detail=f"No tips found for '{food}'.")
+    return {"food": food.lower(), "tips": tips}
